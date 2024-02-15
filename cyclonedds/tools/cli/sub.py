@@ -1,12 +1,13 @@
 from threading import Thread
 import rich_click as click
-import json
 from rich import print
 from rich.syntax import Syntax
 from rich.prompt import Prompt
 from rich.console import Console
+import paho.mqtt.client as mqtt
+import orjson 
+import json 
 
-from cyclonedds.qos import Qos
 
 from .utils import (
     TimeDeltaParamType,
@@ -16,13 +17,12 @@ from .utils import (
 )
 from .discovery.main import type_discovery
 from .data import subscribe as data_subscribe
-from .common import select_type, select_qos
 
 
 @click.command(short_help="Subscribe to an arbitrary topic")
 @click.argument("topic")
 @click.option(
-    "-i", "--id", "--domain-id", type=int, help="DDS Domain to inspect."
+    "-i", "--id", "--domain-id", type=int, default=0, help="DDS Domain to inspect."
 )
 @click.option(
     "-r",
@@ -45,59 +45,74 @@ from .common import select_type, select_qos
 See the [underline blue][link=https://rich.readthedocs.io/en/stable/console.html#color-systems]Rich documentation[/link][/] for more info on what the options mean.""",
 )
 @click.option(
-    "--qos",
-    type=click.Choice(["scan", "scan-random", "dds-default", "json"]),
-    default="scan",
-    help="""Method to determine the QoS settings of the reader. With "scan" the network is scanned for existing QoS used.
-"scan-random" functions the same way but does not prompt for input, but simply picks a random QoS in case of conflicts.
-With "dds-default" the default QoS from the DDS specification is used and with  "json" your first line of input should be a
-json string with the QoS settings, defined by the output of `cyclonedds.qos.Qos.asdict()`.""",
+    "--mqtt-server",
+    type=str,
+    default="localhost",
+    help=""" mqtt server """
 )
 @click.option(
-    "--type",
-    type=click.Choice(["scan", "scan-random"]),
-    default="scan",
-    help="""Method to determine the datatype of the reader. With "scan" the network is scanned for existing types using XTypes.
-"scan-random" functions the same way but does not prompt for input, but simply picks a random datatype in case of conflicts.""",
+    "--mqtt-topic",
+    type=str,
+    help=""" publish mqtt topic """
 )
-def subscribe(topic, id, runtime, suppress_progress_bar, color, qos, type):
+def subscribe(topic, id, runtime, suppress_progress_bar, color,mqtt_server,mqtt_topic):
     """Subscribe to an arbitrary topic"""
-
-    if qos == "json":
-        try:
-            qos_endpoint = Qos.fromdict(json.loads(input()))
-            qos_topic = qos_endpoint
-        except:
-            return 1
-
     console = Console(color_system=None if color == "none" else color)
     live = LiveData(console)
-
     thread = Thread(target=type_discovery, args=(live, id, runtime, topic))
     thread.start()
 
+    console.print()
     background_progress_viewer(runtime, live, suppress_progress_bar)
 
     thread.join()
 
-    if qos in ["scan", "scan-random"]:
-        qos_topic, qos_endpoint = select_qos(
-            console, live.result, False, qos == "scan-random"
+    if not live.result:
+        console.print(
+            "[bold red] :police_car_light: No types could be discovered over XTypes, no dynamic subsciption possible[/]"
         )
-    elif qos == "dds-default":
-        qos_topic, qos_endpoint = Qos(), Qos()
-
-    discovered_type = select_type(console, live.result, type == "scan-random")
-
-    if not discovered_type:
         return
+    elif len(live.result) > 1:
+        console.print(
+            "[bold orange] :warning: Multiple type definitions exist, please pick one"
+        )
+
+        for i, (_, code, pp) in enumerate(live.result):
+            console.print(
+                f"Type {i}, As defined in participant(s) [magenta]"
+                + ", ".join(f"{p}" for p in pp)
+            )
+            console.print(Syntax(code, "omg-idl"))
+            console.print()
+
+        index = Prompt.ask(
+            "Please pick a type:",
+            choices=[f"Type {i}" for i in range(len(live.result))],
+        )
+        index = int(index[len("Type: ") :])
+
+        datatype = live.result[i][0]
+    else:
+        datatype = live.result[0][0]
 
     console.print("[bold green] Subscribing, CTRL-C to quit")
 
-    thread = Thread(
-        target=data_subscribe,
-        args=(live, id, topic, discovered_type.dtype, qos_topic, qos_endpoint),
-    )
+    mqttc=None
+    if mqtt_server and mqtt_topic: 
+        mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        mqttc.connect(mqtt_server)
+        
+    def toDict(obj): 
+        tmp=orjson.dumps(obj)
+        ans=orjson.loads(tmp) 
+        del ans["sample_info"]
+        return ans
+        
+    def onMsg(obj): 
+        if mqttc:
+            mqttc.publish(mqtt_topic,orjson.dumps(toDict(obj)))
+
+    thread = Thread(target=data_subscribe, args=(live, id, topic, datatype,onMsg))
     thread.start()
 
     console.print()
