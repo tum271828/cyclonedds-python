@@ -1,29 +1,19 @@
 import time
-from typing import Any, Optional
-from cyclonedds import qos, domain, sub, topic
-
+from typing import Any
+from cyclonedds import domain, sub, topic
 from ..utils import LiveData
 
 
-def subscribe(
-    live: LiveData,
-    domain_id: Optional[int],
-    topic_name: str,
-    datatype: Any,
-    topicqos: qos.Qos,
-    readerqos: qos.Qos,
-):
-    if domain_id is None:
-        dp = domain.DomainParticipant()
-    else:
-        dp = domain.DomainParticipant(domain_id)
-    tp = topic.Topic(dp, topic_name, datatype, qos=topicqos)
-    rd = sub.DataReader(dp, tp, qos=readerqos)
+def subscribe(live: LiveData, domain_id: int, topic_name: str, datatype: Any,onMsg=None):
+    dp = domain.DomainParticipant(domain_id)
+    tp = topic.Topic(dp, topic_name, datatype)
+    rd = sub.DataReader(dp, tp)
 
     while not live.terminate:
         for data in rd.take(N=20):
             live.printables.put(data, block=True)
-
+            if onMsg: 
+                onMsg(data)
         # yield thread
         time.sleep(0.01)
 
